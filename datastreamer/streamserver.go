@@ -263,7 +263,7 @@ func (s *StreamServer) checkClientInactivity() {
 		s.mutexClients.Unlock()
 
 		for clientID := range clientsToKill {
-			log.Infof("killing inactive client %s", clientID)
+			log.Warnf("killing inactive client %s", clientID)
 			s.killClient(clientID)
 		}
 	}
@@ -331,14 +331,22 @@ func (s *StreamServer) handleConnection(conn net.Conn) {
 
 		// Check stream type
 		if st != s.streamType {
-			log.Errorf("Mismatch stream type, killed: %s", clientID)
+			log.Errorf("Mismatch stream type: client %s killed", clientID)
+			s.killClient(clientID)
+			return
+		}
+
+		// Check if the client is nil
+		safeClient := s.getSafeClient(clientID)
+		if safeClient == nil {
+			log.Errorf("Client %s is nil", clientID)
 			s.killClient(clientID)
 			return
 		}
 
 		// Manage the requested command
 		log.Debugf("Command %d[%s] received from %s", command, StrCommand[Command(command)], clientID)
-		err = s.processCommand(Command(command), s.getSafeClient(clientID))
+		err = s.processCommand(Command(command), safeClient)
 		if err != nil {
 			log.Errorf("Error processing command %d[%s] from %s: %v", command, StrCommand[Command(command)], clientID, err)
 		}
@@ -464,7 +472,7 @@ func (s *StreamServer) CommitAtomicOp() error {
 	// No atomic operation in progress
 	s.clearAtomicOp()
 
-	log.Infof("committed datastream atomic operation, startEntry: %d, time: %v", s.atomicOp.startEntry, time.Since(start))
+	log.Debugf("committed datastream atomic operation, startEntry: %d, time: %v", s.atomicOp.startEntry, time.Since(start))
 
 	return nil
 }
@@ -474,7 +482,7 @@ func (s *StreamServer) RollbackAtomicOp() error {
 	start := time.Now().UnixNano()
 	defer log.Debugf("RollbackAtomicOp process time: %vns", time.Now().UnixNano()-start)
 
-	log.Infof("rollback datastream atomic operation, startEntry: %d", s.atomicOp.startEntry)
+	log.Debugf("rollback datastream atomic operation, startEntry: %d", s.atomicOp.startEntry)
 	if s.atomicOp.status != aoStarted {
 		log.Errorf("Rollback not allowed, AtomicOp is not in the started state")
 		return ErrRollbackNotAllowed
@@ -734,7 +742,7 @@ func (s *StreamServer) broadcastAtomicOp() {
 			}
 		}
 
-		log.Infof("sent datastream entries, count: %d, clients: %d, time: %v, clients-ip: {%s}",
+		log.Debugf("sent datastream entries, count: %d, clients: %d, time: %v, clients-ip: {%s}",
 			len(broadcastOp.entries), len(s.clients), time.Since(start), sClients)
 	}
 }
@@ -878,11 +886,11 @@ func (s *StreamServer) processCmdStart(client *client) error {
 	client.fromEntry = fromEntry
 
 	// Log
-	log.Infof("Client %s command Start from %d", client.clientID, fromEntry)
+	log.Debugf("Client %s command Start from %d", client.clientID, fromEntry)
 
 	// Check received param
 	if fromEntry > s.nextEntry && fromEntry > s.initEntry {
-		log.Infof("Start command invalid from entry %d for client %s", fromEntry, client.clientID)
+		log.Errorf("Start command invalid from entry %d for client %s", fromEntry, client.clientID)
 		err = ErrStartCommandInvalidParamFromEntry
 		_ = s.sendResultEntry(uint32(CmdErrBadFromEntry), StrCommandErrors[CmdErrBadFromEntry], client)
 		return err
@@ -912,7 +920,7 @@ func (s *StreamServer) processCmdStartBookmark(client *client) error {
 
 	// Check maximum length allowed
 	if length > maxBookmarkLength {
-		log.Infof("Client %s exceeded [%d] maximum allowed length [%d] for a bookmark.",
+		log.Errorf("Client %s exceeded [%d] maximum allowed length [%d] for a bookmark.",
 			client.clientID, length, maxBookmarkLength)
 		return ErrBookmarkMaxLength
 	}
@@ -924,12 +932,12 @@ func (s *StreamServer) processCmdStartBookmark(client *client) error {
 	}
 
 	// Log
-	log.Infof("Client %s command StartBookmark [%v]", client.clientID, bookmark)
+	log.Debugf("Client %s command StartBookmark [%v]", client.clientID, bookmark)
 
 	// Get bookmark
 	entryNum, err := s.bookmark.GetBookmark(bookmark)
 	if err != nil {
-		log.Infof("StartBookmark command invalid from bookmark %v for client %s: %v", bookmark, client.clientID, err)
+		log.Errorf("StartBookmark command invalid from bookmark %v for client %s: %v", bookmark, client.clientID, err)
 		err = ErrStartBookmarkInvalidParamFromBookmark
 		_ = s.sendResultEntry(uint32(CmdErrBadFromBookmark), StrCommandErrors[CmdErrBadFromBookmark], client)
 		return err
@@ -942,7 +950,7 @@ func (s *StreamServer) processCmdStartBookmark(client *client) error {
 	}
 
 	// Stream entries data from the entry number marked by the bookmark
-	log.Infof("Client %s Bookmark [%v] is the entry number [%d]", client.clientID, bookmark, entryNum)
+	log.Debugf("Client %s Bookmark [%v] is the entry number [%d]", client.clientID, bookmark, entryNum)
 	if entryNum < s.nextEntry {
 		err = s.streamingFromEntry(client, entryNum)
 	}
@@ -953,7 +961,7 @@ func (s *StreamServer) processCmdStartBookmark(client *client) error {
 // processCmdStop processes the TCP Stop command from the clients
 func (s *StreamServer) processCmdStop(client *client) error {
 	// Log
-	log.Infof("Client %s command Stop", client.clientID)
+	log.Debugf("Client %s command Stop", client.clientID)
 
 	// Send a command result entry OK
 	err := s.sendResultEntry(0, "OK", client)
@@ -963,7 +971,7 @@ func (s *StreamServer) processCmdStop(client *client) error {
 // processCmdHeader processes the TCP Header command from the clients
 func (s *StreamServer) processCmdHeader(client *client) error {
 	// Log
-	log.Infof("Client %s command Header", client.clientID)
+	log.Debugf("Client %s command Header", client.clientID)
 
 	// Send a command result entry OK
 	err := s.sendResultEntry(0, "OK", client)
@@ -982,7 +990,7 @@ func (s *StreamServer) processCmdHeader(client *client) error {
 		err = ErrNilConnection
 	}
 	if err != nil {
-		log.Warnf("Error sending header entry to %s: %v", client.clientID, err)
+		log.Errorf("Error sending header entry to %s: %v", client.clientID, err)
 		return err
 	}
 	return nil
@@ -997,7 +1005,7 @@ func (s *StreamServer) processCmdEntry(client *client) error {
 	}
 
 	// Log
-	log.Infof("Client %s command Entry %d", client.clientID, entryNumber)
+	log.Debugf("Client %s command Entry %d", client.clientID, entryNumber)
 
 	// Send a command result entry OK
 	err = s.sendResultEntry(0, "OK", client)
@@ -1008,7 +1016,7 @@ func (s *StreamServer) processCmdEntry(client *client) error {
 	// Get the requested entry
 	entry, err := s.GetEntry(entryNumber)
 	if err != nil {
-		log.Infof("Error getting entry, not found? %d: %v", entryNumber, err)
+		log.Warnf("Entry not found %d: %v", entryNumber, err)
 		entry = FileEntry{}
 		entry.Length = FixedSizeFileEntry
 		entry.Type = EntryTypeNotFound
@@ -1023,7 +1031,7 @@ func (s *StreamServer) processCmdEntry(client *client) error {
 		err = ErrNilConnection
 	}
 	if err != nil {
-		log.Warnf("Error sending entry to %s: %v", client.clientID, err)
+		log.Errorf("Error sending entry to %s: %v", client.clientID, err)
 		return err
 	}
 
@@ -1040,7 +1048,7 @@ func (s *StreamServer) processCmdBookmark(client *client) error {
 
 	// Check maximum length allowed
 	if length > maxBookmarkLength {
-		log.Infof("Client %s exceeded [%d] maximum allowed length [%d] for a bookmark.",
+		log.Errorf("Client %s exceeded [%d] maximum allowed length [%d] for a bookmark.",
 			client.clientID, length, maxBookmarkLength)
 		return ErrBookmarkMaxLength
 	}
@@ -1052,7 +1060,7 @@ func (s *StreamServer) processCmdBookmark(client *client) error {
 	}
 
 	// Log
-	log.Infof("Client %s command Bookmark %v", client.clientID, bookmark)
+	log.Debugf("Client %s command Bookmark %v", client.clientID, bookmark)
 
 	// Send a command result entry OK
 	err = s.sendResultEntry(0, "OK", client)
@@ -1063,7 +1071,7 @@ func (s *StreamServer) processCmdBookmark(client *client) error {
 	// Get the requested bookmark
 	entry, err := s.GetFirstEventAfterBookmark(bookmark)
 	if err != nil {
-		log.Infof("Error getting bookmark, not found? %v: %v", bookmark, err)
+		log.Warnf("Entry not found %v: %v", bookmark, err)
 		entry = FileEntry{}
 		entry.Length = FixedSizeFileEntry
 		entry.Type = EntryTypeNotFound
@@ -1078,7 +1086,7 @@ func (s *StreamServer) processCmdBookmark(client *client) error {
 		err = ErrNilConnection
 	}
 	if err != nil {
-		log.Warnf("Error sending entry to %s: %v", client.clientID, err)
+		log.Errorf("Error sending entry to %s: %v", client.clientID, err)
 		return err
 	}
 
@@ -1088,7 +1096,7 @@ func (s *StreamServer) processCmdBookmark(client *client) error {
 // streamingFromEntry sends to the client the stream data starting from the requested entry number
 func (s *StreamServer) streamingFromEntry(client *client, fromEntry uint64) error {
 	// Log
-	log.Infof("SYNCING %s from entry %d...", client.clientID, fromEntry)
+	log.Debugf("SYNCING %s from entry %d...", client.clientID, fromEntry)
 
 	// Start file stream iterator
 	iterator, err := s.streamFile.iteratorFrom(fromEntry, true)
@@ -1117,11 +1125,11 @@ func (s *StreamServer) streamingFromEntry(client *client, fromEntry uint64) erro
 			err = ErrNilConnection
 		}
 		if err != nil {
-			log.Warnf("Error sending entry %d to %s: %v", iterator.Entry.Number, client.clientID, err)
+			log.Errorf("Error sending entry %d to %s: %v", iterator.Entry.Number, client.clientID, err)
 			return err
 		}
 	}
-	log.Infof("Synced %s until %d!", client.clientID, iterator.Entry.Number)
+	log.Debugf("Synced %s until %d!", client.clientID, iterator.Entry.Number)
 
 	// Close iterator
 	s.streamFile.iteratorEnd(iterator)
@@ -1153,7 +1161,7 @@ func (s *StreamServer) sendResultEntry(errorNum uint32, errorStr string, client 
 		err = ErrNilConnection
 	}
 	if err != nil {
-		log.Warnf("Error sending result entry to %s: %v", client.clientID, err)
+		log.Errorf("Error sending result entry to %s: %v", client.clientID, err)
 		return err
 	}
 	return nil
